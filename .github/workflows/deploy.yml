@@ -42,7 +42,7 @@ jobs:
     needs: build          # only runs if build job passes
     environment:
       name: production
-      url: http://${{ secrets.EC2_HOST }}
+      url: http://65.0.204.215
     steps:
       - name: 🚀 SSH into EC2 and Deploy
         uses: appleboy/ssh-action@v1.2.0
@@ -78,5 +78,5 @@ jobs:
             echo "──────────────────────────────────────"
             echo "✅ Deployment complete at $(date -u)"
             echo "📄 dist/index.html → ${SIZE}"
-            echo "🌐 Live at: http://${{ secrets.EC2_HOST }}"
+            echo "🌐 Live at: http://65.0.204.215"
             echo "──────────────────────────────────────"
