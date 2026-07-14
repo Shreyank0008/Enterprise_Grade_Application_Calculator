@@ -20,7 +20,10 @@ import {
   Typography,
 } from '@mui/material';
 import FolderZipRoundedIcon from '@mui/icons-material/DriveFolderUploadRounded';
+import GitHubIcon from '@mui/icons-material/GitHub';
+import { ToggleButton, ToggleButtonGroup, TextField } from '@mui/material';
 import { readFolder } from '../scanner/readFolder';
+import { fetchRepoEntries } from '../scanner/readRepo';
 import { collectSignals } from '../scanner/signals';
 import { buildProposals, type Proposal } from '../scanner/rules';
 import { TOTAL_PARAMETERS } from '../data/parameters';
@@ -45,6 +48,10 @@ export default function ScanDialog({
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [included, setIncluded] = useState<Record<string, boolean>>({});
   const [summary, setSummary] = useState('');
+  const [source, setSource] = useState<'folder' | 'repo'>('folder');
+  const [repoUrl, setRepoUrl] = useState('');
+  const [repoToken, setRepoToken] = useState('');
+  const [statusText, setStatusText] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   const includedCount = useMemo(
@@ -60,26 +67,52 @@ export default function ScanDialog({
     setIncluded({});
   };
 
+  const analyze = (entries: Parameters<typeof collectSignals>[0], label: string) => {
+    setStatusText('Analyzing code…');
+    const scan = collectSignals(entries);
+    const props = buildProposals(scan);
+    setProposals(props);
+    setIncluded(Object.fromEntries(props.map((p) => [p.parameterId, true])));
+    const lang = scan.languages[0]?.name ?? 'unknown';
+    setSummary(
+      `${label} · ${scan.signals.fileCount.toLocaleString()} files · ${scan.signals.totalLoc.toLocaleString()} LOC · primary language ${lang}`,
+    );
+    setPhase('review');
+  };
+
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setPhase('scanning');
     setError('');
+    setStatusText('Reading files…');
     try {
       const entries = await readFolder(files, (done, total) =>
         setProgress(total > 0 ? Math.round((done / total) * 100) : 0),
       );
-      const scan = collectSignals(entries);
-      const props = buildProposals(scan);
-      setProposals(props);
-      setIncluded(Object.fromEntries(props.map((p) => [p.parameterId, true])));
-      const lang = scan.languages[0]?.name ?? 'unknown';
-      setSummary(
-        `${scan.signals.fileCount.toLocaleString()} files · ${scan.signals.totalLoc.toLocaleString()} LOC · primary language ${lang}`,
-      );
-      setPhase('review');
+      analyze(entries, 'Local folder');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Scan failed');
       setPhase('pick');
+    }
+  };
+
+  const handleRepo = async () => {
+    if (!repoUrl.trim()) return;
+    setPhase('scanning');
+    setError('');
+    setProgress(-1); // indeterminate
+    try {
+      const { entries, label } = await fetchRepoEntries(
+        repoUrl,
+        repoToken || undefined,
+        setStatusText,
+      );
+      analyze(entries, label);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Repository scan failed');
+      setPhase('pick');
+    } finally {
+      setProgress(0);
     }
   };
 
@@ -106,36 +139,99 @@ export default function ScanDialog({
       </DialogTitle>
       <DialogContent>
         {phase === 'pick' && (
-          <Box sx={{ textAlign: 'center', py: 5 }}>
+          <Box sx={{ textAlign: 'center', py: 3 }}>
             {error && <Alert severity="error" sx={{ mb: 2, textAlign: 'left' }}>{error}</Alert>}
-            <FolderZipRoundedIcon sx={{ fontSize: 56, color: 'primary.main' }} />
-            <Typography sx={{ mt: 1, fontWeight: 600 }}>
-              Select your project folder
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 3, maxWidth: 460, mx: 'auto' }}>
-              The folder is analyzed locally in your browser — no files are uploaded
-              anywhere. Detected metrics are mapped to weightages (0–5) that you
-              review before anything is applied.
-            </Typography>
-            <Button variant="contained" onClick={() => inputRef.current?.click()}>
-              Choose Folder…
-            </Button>
-            <input
-              ref={inputRef}
-              type="file"
-              hidden
-              /* non-standard but supported by all Chromium/Firefox/Safari */
-              {...({ webkitdirectory: '', directory: '' } as object)}
-              multiple
-              onChange={(e) => handleFiles(e.target.files)}
-            />
+            <ToggleButtonGroup
+              exclusive
+              size="small"
+              value={source}
+              onChange={(_e, v) => v && setSource(v)}
+              sx={{ mb: 3 }}
+            >
+              <ToggleButton value="folder" sx={{ px: 2.5 }}>
+                <FolderZipRoundedIcon sx={{ fontSize: 18, mr: 1 }} /> Local Folder
+              </ToggleButton>
+              <ToggleButton value="repo" sx={{ px: 2.5 }}>
+                <GitHubIcon sx={{ fontSize: 18, mr: 1 }} /> GitHub Repo
+              </ToggleButton>
+            </ToggleButtonGroup>
+
+            {source === 'folder' ? (
+              <Box>
+                <FolderZipRoundedIcon sx={{ fontSize: 52, color: 'primary.main' }} />
+                <Typography sx={{ mt: 1, fontWeight: 600 }}>
+                  Select your project folder
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 3, maxWidth: 460, mx: 'auto' }}>
+                  The folder is analyzed locally in your browser — no files are uploaded
+                  anywhere. Detected metrics are mapped to weightages (0–5) that you
+                  review before anything is applied.
+                </Typography>
+                <Button variant="contained" onClick={() => inputRef.current?.click()}>
+                  Choose Folder…
+                </Button>
+                <input
+                  ref={inputRef}
+                  type="file"
+                  hidden
+                  /* non-standard but supported by all Chromium/Firefox/Safari */
+                  {...({ webkitdirectory: '', directory: '' } as object)}
+                  multiple
+                  onChange={(e) => handleFiles(e.target.files)}
+                />
+              </Box>
+            ) : (
+              <Box sx={{ maxWidth: 520, mx: 'auto', textAlign: 'left' }}>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  The repository is downloaded straight from GitHub into your browser
+                  and analyzed there — it never touches this app's server. Public
+                  repos need no token; for private repos add a fine-grained personal
+                  access token with read-only content access (used once, never stored).
+                </Typography>
+                <TextField
+                  fullWidth
+                  size="small"
+                  label="Repository URL"
+                  placeholder="https://github.com/owner/repo or owner/repo"
+                  value={repoUrl}
+                  onChange={(e) => setRepoUrl(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleRepo()}
+                  sx={{ mb: 2 }}
+                />
+                <TextField
+                  fullWidth
+                  size="small"
+                  type="password"
+                  label="GitHub token (optional — private repos / rate limits)"
+                  value={repoToken}
+                  onChange={(e) => setRepoToken(e.target.value)}
+                  sx={{ mb: 2.5 }}
+                />
+                <Box sx={{ textAlign: 'center' }}>
+                  <Button
+                    variant="contained"
+                    startIcon={<GitHubIcon />}
+                    disabled={!repoUrl.trim()}
+                    onClick={handleRepo}
+                  >
+                    Fetch &amp; Scan Repository
+                  </Button>
+                </Box>
+              </Box>
+            )}
           </Box>
         )}
 
         {phase === 'scanning' && (
           <Box sx={{ py: 6, textAlign: 'center' }}>
-            <Typography sx={{ mb: 2, fontWeight: 600 }}>Analyzing files… {progress}%</Typography>
-            <LinearProgress variant="determinate" value={progress} sx={{ height: 8, maxWidth: 420, mx: 'auto' }} />
+            <Typography sx={{ mb: 2, fontWeight: 600 }}>
+              {statusText || 'Working…'}{progress > 0 ? ` ${progress}%` : ''}
+            </Typography>
+            <LinearProgress
+              variant={progress > 0 ? 'determinate' : 'indeterminate'}
+              value={progress > 0 ? progress : undefined}
+              sx={{ height: 8, maxWidth: 420, mx: 'auto' }}
+            />
           </Box>
         )}
 
