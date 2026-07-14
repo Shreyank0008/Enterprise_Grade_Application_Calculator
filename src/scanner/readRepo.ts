@@ -1,9 +1,13 @@
-/* GitHub repository ingestion: downloads a repo zipball via the GitHub API
-   directly from the browser (api.github.com sends CORS headers), unzips it
-   in memory with fflate, and returns the same FileEntry[] shape the folder
-   scanner uses. Public repos need no token; private repos need a
-   fine-grained PAT with read access (used only for this request, never stored). */
-import { unzipSync } from 'fflate';
+/* GitHub repository ingestion — runs entirely in the browser.
+   Note: GitHub's zipball/tarball downloads redirect to codeload.github.com,
+   which does NOT send CORS headers for third-party origins, so archives
+   can't be fetched from a browser. Instead we:
+     1. list the repo tree via api.github.com (CORS-enabled),
+     2. fetch each relevant text file individually —
+        - public repos: raw.githubusercontent.com (CORS *, no API rate limit)
+        - with a token:  api.github.com blob endpoint (5000 req/hr authed)
+   Public repos need no token; private repos need a fine-grained PAT with
+   read access (used only for these requests, never stored). */
 import { isReadable, isRelevantPath, type FileEntry } from './signals';
 
 export interface RepoRef {
@@ -12,8 +16,10 @@ export interface RepoRef {
   branch?: string;
 }
 
-const MAX_FILES = 8000;
-const MAX_ZIP_BYTES = 150 * 1024 * 1024; // 150 MB
+const MAX_FILES = 8000; // entries kept for path-based signals
+const MAX_CONTENT_FILES = 1500; // files whose text we download
+const MAX_TOTAL_BYTES = 150 * 1024 * 1024; // 150 MB repo cap
+const CONCURRENCY = 16;
 
 export function parseRepoUrl(input: string): RepoRef {
   const s = input.trim();
@@ -39,16 +45,24 @@ function ghHeaders(token?: string): HeadersInit {
   return h;
 }
 
+interface TreeItem {
+  path: string;
+  type: 'blob' | 'tree' | 'commit';
+  sha: string;
+  size?: number;
+}
+
 export async function fetchRepoEntries(
   input: string,
   token: string | undefined,
   onStatus: (status: string) => void,
 ): Promise<{ entries: FileEntry[]; label: string }> {
   const ref = parseRepoUrl(input);
+  const tok = token?.trim() || undefined;
 
   onStatus('Looking up repository…');
   const infoRes = await fetch(`https://api.github.com/repos/${ref.owner}/${ref.repo}`, {
-    headers: ghHeaders(token),
+    headers: ghHeaders(tok),
   });
   if (infoRes.status === 404) {
     throw new Error(
@@ -61,63 +75,84 @@ export async function fetchRepoEntries(
     );
   }
   if (!infoRes.ok) throw new Error(`GitHub API error (${infoRes.status}).`);
-  const info = (await infoRes.json()) as { default_branch: string; size: number };
+  const info = (await infoRes.json()) as {
+    default_branch: string;
+    size: number;
+    private: boolean;
+  };
   const branch = ref.branch ?? info.default_branch;
 
-  if (info.size * 1024 > MAX_ZIP_BYTES) {
+  if (info.size * 1024 > MAX_TOTAL_BYTES) {
     throw new Error(
       'Repository is larger than 150 MB — too big to analyze in the browser. Clone it locally and use "Local Folder" instead.',
     );
   }
 
-  onStatus(`Downloading ${ref.owner}/${ref.repo}@${branch}…`);
-  const zipRes = await fetch(
-    `https://api.github.com/repos/${ref.owner}/${ref.repo}/zipball/${encodeURIComponent(branch)}`,
-    { headers: ghHeaders(token) },
+  onStatus('Listing repository files…');
+  const treeRes = await fetch(
+    `https://api.github.com/repos/${ref.owner}/${ref.repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+    { headers: ghHeaders(tok) },
   );
-  if (!zipRes.ok) {
+  if (!treeRes.ok) {
     throw new Error(
-      zipRes.status === 404
+      treeRes.status === 404
         ? `Branch "${branch}" not found.`
-        : `Failed to download repository (${zipRes.status}).`,
+        : `Failed to list repository files (${treeRes.status}).`,
     );
   }
-  const buf = new Uint8Array(await zipRes.arrayBuffer());
-  if (buf.byteLength > MAX_ZIP_BYTES) {
-    throw new Error('Downloaded archive exceeds the 150 MB browser limit.');
-  }
+  const tree = (await treeRes.json()) as { tree: TreeItem[]; truncated?: boolean };
 
-  onStatus('Extracting files…');
-  // yield so the status renders before the synchronous unzip
-  await new Promise((r) => setTimeout(r, 30));
-  return {
-    entries: zipToEntries(buf),
-    label: `${ref.owner}/${ref.repo}@${branch}`,
-  };
-}
-
-export function zipToEntries(zipBytes: Uint8Array): FileEntry[] {
-  const unzipped = unzipSync(zipBytes, {
-    filter: (f) => {
-      const rel = stripRoot(f.name);
-      return rel !== '' && !f.name.endsWith('/') && isRelevantPath(rel);
-    },
-  });
-  const decoder = new TextDecoder('utf-8', { fatal: false });
+  // Keep every relevant path for path-based signals; mark which get content.
+  const blobs = tree.tree.filter((t) => t.type === 'blob' && isRelevantPath(t.path));
   const entries: FileEntry[] = [];
-  for (const [name, data] of Object.entries(unzipped)) {
+  const toFetch: { entry: FileEntry; sha: string }[] = [];
+  for (const b of blobs) {
     if (entries.length >= MAX_FILES) break;
-    const path = stripRoot(name);
-    const entry: FileEntry = { path, size: data.byteLength };
-    if (isReadable(path, data.byteLength)) {
-      entry.text = decoder.decode(data);
-    }
+    const entry: FileEntry = { path: b.path, size: b.size ?? 0 };
     entries.push(entry);
+    if (toFetch.length < MAX_CONTENT_FILES && isReadable(b.path, b.size ?? 0)) {
+      toFetch.push({ entry, sha: b.sha });
+    }
   }
-  return entries;
-}
 
-/** Zipballs wrap everything in a "owner-repo-sha/" root folder — remove it. */
-function stripRoot(zipPath: string): string {
-  return zipPath.split('/').slice(1).join('/');
+  // Private repos (or user-supplied token): use the authenticated blob API.
+  // Public repos without a token: raw.githubusercontent.com — CORS-enabled
+  // and not subject to the 60 req/hr anonymous API limit.
+  const useBlobApi = Boolean(tok);
+  const rawBase = `https://raw.githubusercontent.com/${ref.owner}/${ref.repo}/${encodeURIComponent(branch)}/`;
+
+  let done = 0;
+  const total = toFetch.length;
+  const fetchOne = async (item: { entry: FileEntry; sha: string }): Promise<void> => {
+    try {
+      const res = useBlobApi
+        ? await fetch(
+            `https://api.github.com/repos/${ref.owner}/${ref.repo}/git/blobs/${item.sha}`,
+            { headers: { ...ghHeaders(tok), Accept: 'application/vnd.github.raw+json' } },
+          )
+        : await fetch(rawBase + item.entry.path.split('/').map(encodeURIComponent).join('/'));
+      if (res.ok) item.entry.text = await res.text();
+    } catch {
+      /* skip unreadable file — path-based signals still count it */
+    }
+    done += 1;
+    if (done % 25 === 0 || done === total) {
+      onStatus(`Downloading files… ${done}/${total}`);
+    }
+  };
+
+  onStatus(`Downloading files… 0/${total}`);
+  const queue = [...toFetch];
+  const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+    for (let item = queue.shift(); item; item = queue.shift()) {
+      await fetchOne(item);
+    }
+  });
+  await Promise.all(workers);
+
+  const suffix = tree.truncated ? ' (large repo — partial listing)' : '';
+  return {
+    entries,
+    label: `${ref.owner}/${ref.repo}@${branch}${suffix}`,
+  };
 }
