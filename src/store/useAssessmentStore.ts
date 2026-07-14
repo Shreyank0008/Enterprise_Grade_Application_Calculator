@@ -13,6 +13,7 @@ interface AssessmentState {
   deleteAssessment: (id: string) => void;
   renameAssessment: (id: string, name: string) => void;
   setWeightage: (assessmentId: string, parameterId: string, weightage: number | null) => void;
+  applyWeightages: (assessmentId: string, entries: { parameterId: string; weightage: number }[]) => void;
   resetWeightages: (assessmentId: string) => void;
 }
 
@@ -59,6 +60,18 @@ export const useAssessmentStore = create<AssessmentState>()(
               delete weightages[parameterId];
             } else {
               weightages[parameterId] = weightage;
+            }
+            return { ...a, weightages, updatedAt: new Date().toISOString() };
+          }),
+        })),
+
+      applyWeightages: (assessmentId, entries) =>
+        set((s) => ({
+          assessments: s.assessments.map((a) => {
+            if (a.id !== assessmentId) return a;
+            const weightages = { ...a.weightages };
+            for (const e of entries) {
+              weightages[e.parameterId] = Math.max(0, Math.min(5, Math.round(e.weightage)));
             }
             return { ...a, weightages, updatedAt: new Date().toISOString() };
           }),

@@ -29,3 +29,14 @@ React Hook Form · TanStack Table · Recharts · SheetJS (Excel export) · jsPDF
 5. Classification: <2,000 Small · <5,000 Medium · <10,000 Large · <20,000 Enterprise · ≥20,000 Very Large Enterprise.
 
 All data is stored in browser localStorage (no backend). Export via Excel, PDF, or Print.
+
+## Auto-fill from code
+
+Open an assessment → **Auto-Fill from Code** → select a project folder.
+The folder is analyzed locally in the browser (nothing is uploaded): file
+tree, manifests, and code patterns are turned into signals, and a rules
+engine (`src/scanner/rules.ts`) maps them to proposed weightages (0–5)
+with evidence. You review and adjust every value before applying. ~150 of
+the 205 parameters can be scored this way; subjective ones (business,
+delivery, migration context) are left for manual entry. Thresholds are
+tunable in `rules.ts`.

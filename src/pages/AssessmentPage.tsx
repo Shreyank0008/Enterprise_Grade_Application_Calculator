@@ -17,6 +17,8 @@ import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf';
 import PrintIcon from '@mui/icons-material/Print';
 import CloudDoneIcon from '@mui/icons-material/CloudDone';
+import AutoFixHighRoundedIcon from '@mui/icons-material/AutoFixHighRounded';
+import ScanDialog from '../components/ScanDialog';
 import AssessmentTable from '../components/AssessmentTable';
 import Dashboard from '../components/Dashboard';
 import { useAssessment } from '../store/useAssessmentStore';
@@ -34,6 +36,7 @@ export default function AssessmentPage() {
   const navigate = useNavigate();
   const assessment = useAssessment(id);
   const [tab, setTab] = useState(0);
+  const [scanOpen, setScanOpen] = useState(false);
 
   if (!assessment) {
     return (
@@ -91,6 +94,14 @@ export default function AssessmentPage() {
           </Box>
           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
             <Button
+              variant="contained"
+              size="small"
+              startIcon={<AutoFixHighRoundedIcon />}
+              onClick={() => setScanOpen(true)}
+            >
+              Auto-Fill from Code
+            </Button>
+            <Button
               variant="outlined"
               size="small"
               startIcon={<FileDownloadIcon />}
@@ -124,6 +135,12 @@ export default function AssessmentPage() {
 
       {tab === 0 && <AssessmentTable assessmentId={assessment.id} />}
       {tab === 1 && <Dashboard assessment={assessment} />}
+
+      <ScanDialog
+        assessmentId={assessment.id}
+        open={scanOpen}
+        onClose={() => setScanOpen(false)}
+      />
     </Box>
   );
 }
